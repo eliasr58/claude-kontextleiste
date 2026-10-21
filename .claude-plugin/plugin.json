@@ -1,0 +1,6 @@
+{
+  "name": "kontextleiste",
+  "version": "0.1.0",
+  "description": "Live-Kontextleiste über dem Eingabefeld: Füllstand des Kontextfensters plus 5-Stunden- und Wochenlimit.",
+  "types": "./types/index.d.ts"
+}

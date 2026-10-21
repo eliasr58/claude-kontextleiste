@@ -1,0 +1,5 @@
+{
+  "name": "claude-kontextleiste",
+  "owner": { "name": "Elias Röhrner" },
+  "plugins": [{ "name": "kontextleiste", "source": "./" }]
+}
