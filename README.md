@@ -15,6 +15,14 @@ Eine Zeile über dem Eingabefeld, die live zeigt, wie voll das Kontextfenster de
 
 Der Kontext wird nach jeder Modellantwort aktualisiert. Die Aufschlüsselung nach Inhalt wird lokal geschätzt und kostet keine Tokens.
 
+
+## Befehl
+
+- `/kontextleiste` zeigt den Stand als Textzeile.
+- `/kontextleiste status` zeigt, ob der Mod geladen ist, auf welcher Oberfläche er läuft und ob das Band gezeichnet wurde.
+- `/kontextleiste verbinden <Adresse>` verbindet eine Live-Seite (ein Artefakt mit Datenbank), in die der Mod nach jeder Antwort den Stand schreibt. So lässt sich der Stand auch neben Oberflächen ohne Zeichenfläche verfolgen, etwa neben einem Cowork-Chat.
+- `/kontextleiste immer` / `/kontextleiste warnungen` legt fest, ob auf Oberflächen ohne Zeichenfläche nach jeder Antwort oder nur bei Schwellen ein Hinweis im Verlauf erscheint.
+
 ## Installation
 
 In einer Claude-Code-Sitzung im Terminal:

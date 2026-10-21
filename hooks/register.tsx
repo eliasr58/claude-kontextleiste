@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type {
   EngineInterface,
   Register,
+  ResolveInput,
   SessionContextBreakdown,
   SessionContextUsage,
   SessionRateLimit,
@@ -18,6 +19,8 @@ const STORE_LIMITS = 'limits'
 const ABGLEICH_MS = 15_000
 /** Ab diesem Alter zeigt die Leiste, wie alt die Limits sind. */
 const ALT_MS = 2 * 60_000
+/** Id des Panes, in dem die Leiste auch gezeigt werden kann. */
+const PANE = 'kontextleiste'
 
 const FARBE = {
   gruen: '#639922',
@@ -102,36 +105,8 @@ function alter(ms: number): string {
   return min < 60 ? `vor ${min} min` : `vor ${Math.round(min / 60)} h`
 }
 
-export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    const result = await next(e)
-    await limitsAbgleichen($).catch(() => {})
-    await messen($).catch(() => {})
-    $.clock.every(ABGLEICH_MS, () => {
-      void limitsAbgleichen($).catch(() => {})
-    })
-    return result
-  })
-
-  on('session.measure', async ($, e, next) => {
-    const result = await next(e)
-    if (e.changed.includes('context')) {
-      // Aufschlüsselung nur bei geändertem Kontext; lokal geschätzt, kostet keine Tokens.
-      const u = await $.session
-        .usage({ breakdown: 'summary' })
-        .catch(() => undefined)
-      await update($, kontext, () => zuKontext(e.context, u?.context.breakdown))
-    }
-    if (e.changed.includes('rateLimits')) {
-      const l = zuLimits(e.rateLimits, await $.clock.now())
-      if (l) await limitsMelden($, l).catch(() => {})
-    }
-    return result
-  })
-
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
-
+/** Die eine Zeile der Leiste; gezeichnet über dem Eingabefeld oder im Pane. */
+async function zeichnen($: EngineInterface, e: ResolveInput, spalten: number) {
     const k = await read($, kontext)
     const l = await read($, limits)
     const { Box, Text } = $.ui.resolve(e)
@@ -166,7 +141,7 @@ export const register: Register = on => {
       limitTeile.reduce((n, t) => n + 2 + t.text.length, 0) +
       altText.length +
       punkte.length
-    const breite = Math.max(12, Math.min(40, e.props.bodyColumns - textLaenge - 1))
+    const breite = Math.max(12, Math.min(40, spalten - textLaenge - 1))
     const gefuellt = Math.round((p / 100) * breite)
     const marke =
       k.kompaktBei !== undefined ? Math.min(breite, Math.round((k.kompaktBei / 100) * breite)) : -1
@@ -229,5 +204,229 @@ export const register: Register = on => {
         ) : null}
       </Box>
     )
+}
+
+/** Die Leiste als reiner Text, für Oberflächen ohne Zeichenfläche (Cowork). */
+function textzeile(k: Kontext | null, l: Limits | null, jetzt: number): string {
+  if (k === null || k.prozent === undefined) return 'Kontext: noch keine Messung (kommt mit der ersten Antwort)'
+  const p = Math.max(0, Math.min(100, k.prozent))
+  const breite = 30
+  const gefuellt = Math.round((p / 100) * breite)
+  const zellen = [...'━'.repeat(gefuellt) + '─'.repeat(breite - gefuellt)]
+  if (k.kompaktBei !== undefined) zellen.splice(Math.min(breite, Math.round((k.kompaktBei / 100) * breite)), 0, '│')
+  const teile = [`${zellen.join('')} ${p} %`]
+  if (k.kompaktBei !== undefined) {
+    teile.push(k.kompaktBei - p > 0 ? `noch ${k.kompaktBei - p} % bis Kompaktierung` : 'Kompaktierung steht an')
+  }
+  if (l?.limit5h !== undefined) teile.push(`5h ${Math.round(l.limit5h)} %`)
+  if (l?.limit7t !== undefined) teile.push(`W ${Math.round(l.limit7t)} %`)
+  const alt = l !== null && jetzt - l.am > ALT_MS ? ` (${alter(jetzt - l.am)})` : ''
+  return teile.join(' · ') + alt
+}
+
+/** Schwellen, bei denen Cowork einen Hinweis in den Verlauf bekommt. */
+const REST_WARNUNGEN = [15, 5] as const
+const LIMIT_WARNUNG = 85
+/** Schlüssel in $.store: 'warnungen' (Standard) oder 'immer'. */
+const STORE_MODUS = 'modus'
+
+/** Bereits gemeldete Schwellen, damit jeder Hinweis nur einmal kommt. */
+const gemeldet = new Set<string>()
+
+
+async function ohneZeichenflaeche($: EngineInterface) {
+  return (await $.session.surfaces()).length === 0
+}
+
+async function hinweis($: EngineInterface, text: string) {
+  await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+}
+
+/** Meldet überschrittene Schwellen einmal; fällt ein Wert zurück, wird die Schwelle wieder frei. */
+async function schwellenPruefen($: EngineInterface) {
+  if (!(await ohneZeichenflaeche($))) return
+  const k = await read($, kontext)
+  const l = await read($, limits)
+  const jetzt = await $.clock.now()
+  const ausloeser: string[] = []
+  if (k?.prozent !== undefined && k.kompaktBei !== undefined) {
+    const rest = k.kompaktBei - k.prozent
+    for (const w of REST_WARNUNGEN) {
+      const key = `rest${w}`
+      if (rest <= w && !gemeldet.has(key)) { gemeldet.add(key); ausloeser.push(key) }
+      if (rest > w) gemeldet.delete(key)
+    }
+  }
+  for (const [key, wert] of [['5h', l?.limit5h], ['woche', l?.limit7t]] as const) {
+    if (wert === undefined) continue
+    if (wert >= LIMIT_WARNUNG && !gemeldet.has(key)) { gemeldet.add(key); ausloeser.push(key) }
+    if (wert < LIMIT_WARNUNG) gemeldet.delete(key)
+  }
+  if (ausloeser.length > 0) await hinweis($, `⚠ Kontextleiste: ${textzeile(k, l, jetzt)}`)
+}
+
+
+
+/** Schlüssel in $.store: die URL der Live-Seite im Seitenbereich. */
+const STORE_LIVE = 'liveSeite'
+/** Mindestabstand zwischen zwei Schreibvorgängen auf die Live-Seite während einer Runde. */
+const LIVE_MIN_MS = 20_000
+/** Version des eigenen Dokuments auf der Live-Seite, für if_version. */
+let liveVersion: number | undefined
+let liveZuletzt = 0
+
+function versionAus(text: string | undefined): number | undefined {
+  const m = text ? /"version"\s*:\s*(\d+)/.exec(text) : null
+  return m ? Number(m[1]) : undefined
+}
+
+/** Schreibt den Stand dieser Sitzung in die Datenbank der Live-Seite. Gibt eine Zeile zum Ergebnis zurück. */
+async function liveSchreiben($: EngineInterface): Promise<string> {
+  const url = await $.store.get(STORE_LIVE)
+  if (typeof url !== 'string' || url === '') return 'keine Live-Seite verbunden'
+  const k = await read($, kontext)
+  const l = await read($, limits)
+  if (k === null || k.prozent === undefined) return 'noch keine Messung'
+  const surfaces = await $.session.surfaces()
+  const quelle = surfaces.includes('terminal') ? 'terminal' : surfaces.includes('desktop') ? 'desktop' : 'cowork'
+  const id = (await $.session.id()).replace(/[^A-Za-z0-9_.~-]/g, '-').slice(0, 120)
+  const data: Record<string, unknown> = { prozent: k.prozent, fenster: k.fenster, am: await $.clock.now(), quelle }
+  if (k.tokens !== undefined) data.tokens = k.tokens
+  if (k.kompaktBei !== undefined) data.kompaktBei = k.kompaktBei
+  if (k.anteile) data.anteile = k.anteile
+  if (l?.limit5h !== undefined) data.limit5h = l.limit5h
+  if (l?.limit7t !== undefined) data.limit7t = l.limit7t
+  if (l) data.limitsAm = l.am
+
+  const schreiben = (version: number | undefined) =>
+    $.tool.call({
+      tool: 'ArtifactData',
+      action: 'set',
+      url,
+      collection: 'sitzungen',
+      doc_id: id,
+      data,
+      ...(version !== undefined ? { if_version: version } : {}),
+    } as never)
+
+  let r = await schreiben(liveVersion)
+  if (r.deny) return `verweigert: ${r.deny}`
+  if (r.isError) {
+    // Unbekannte oder veraltete Version: einmal lesen, dann mit der aktuellen Version schreiben.
+    const g = await $.tool.call({ tool: 'ArtifactData', action: 'get', url, collection: 'sitzungen', doc_id: id } as never)
+    r = await schreiben(versionAus(g.text))
+  }
+  if (r.isError || r.deny) return `Fehler: ${(r.deny ?? r.text ?? '').slice(0, 300)}`
+  liveVersion = versionAus(r.text) ?? liveVersion
+  liveZuletzt = await $.clock.now()
+  return `geschrieben (Version ${liveVersion ?? '?'})`
+}
+
+export const register: Register = on => {
+  let bandGezeichnet = false
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+    await $.command
+      .register({
+        name: 'kontextleiste',
+        description: 'Zeigt die Kontextleiste als Text; „immer“ / „warnungen“ schaltet den Modus, „status“ zeigt Diagnose',
+        argumentHint: '[immer|warnungen|status|verbinden <url>|sync]',
+      })
+      .catch(() => {})
+    await limitsAbgleichen($).catch(() => {})
+    await messen($).catch(() => {})
+    $.clock.every(ABGLEICH_MS, () => {
+      void limitsAbgleichen($).catch(() => {})
+    })
+    return result
+  })
+
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e)
+    if (e.changed.includes('context')) {
+      // Aufschlüsselung nur bei geändertem Kontext; lokal geschätzt, kostet keine Tokens.
+      const u = await $.session
+        .usage({ breakdown: 'summary' })
+        .catch(() => undefined)
+      await update($, kontext, () => zuKontext(e.context, u?.context.breakdown))
+    }
+    // Jede Messung bestätigt die Limits neu, auch wenn sich kein ganzer Punkt bewegt hat;
+    // sonst zeigt die Altersangabe den Zeitpunkt der letzten Änderung statt der letzten Messung.
+    if (e.rateLimits.length > 0) {
+      const l = zuLimits(e.rateLimits, await $.clock.now())
+      if (l) await limitsMelden($, l).catch(() => {})
+    }
+    await schwellenPruefen($).catch(() => {})
+    if ((await $.clock.now()) - liveZuletzt > LIVE_MIN_MS) await liveSchreiben($).catch(() => '')
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    await liveSchreiben($).catch(() => '')
+    try {
+      if ((await $.store.get(STORE_MODUS)) === 'immer' && (await ohneZeichenflaeche($))) {
+        await hinweis($, textzeile(await read($, kontext), await read($, limits), await $.clock.now()))
+      }
+    } catch {
+      // Ein fehlender Hinweis darf die Runde nicht stören.
+    }
+    return result
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    bandGezeichnet = true
+    return zeichnen($, e, e.props.bodyColumns)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) =>
+    zeichnen($, e, e.props.bodyColumns),
+  )
+
+  on('command.run', { command: 'kontextleiste' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    const k = await read($, kontext)
+    const l = await read($, limits)
+    const jetzt = await $.clock.now()
+
+    if (arg === 'immer' || arg === 'warnungen') {
+      await $.store.set(STORE_MODUS, arg)
+      return {
+        text:
+          arg === 'immer'
+            ? 'Kontextleiste: Ab jetzt steht nach jeder Antwort eine Zeile mit dem Stand im Verlauf.'
+            : 'Kontextleiste: Ab jetzt nur noch Hinweise bei 15 % und 5 % bis zur Kompaktierung und ab 85 % Limit.',
+      }
+    }
+    if (arg.startsWith('verbinden')) {
+      const url = e.args.trim().split(/\s+/)[1] ?? ''
+      if (!/^https:\/\/claude\.ai\/(code\/)?artifact\//.test(url)) return { text: 'Kontextleiste: Gib die Adresse der Live-Seite mit an, etwa /kontextleiste verbinden https://claude.ai/artifact/…' }
+      await $.store.set(STORE_LIVE, url)
+      liveVersion = undefined
+      return { text: `Kontextleiste: Live-Seite verbunden, erster Abgleich: ${await liveSchreiben($)}` }
+    }
+    if (arg === 'sync') {
+      return { text: `Kontextleiste: ${await liveSchreiben($)}` }
+    }
+    if (arg === 'test') {
+      await hinweis($, `⚠ Kontextleiste (Testhinweis): ${textzeile(k, l, jetzt)}`)
+      return { text: 'Kontextleiste: Testhinweis abgelegt.' }
+    }
+    if (arg === 'status') {
+      const surfaces = await $.session.surfaces()
+      const offen = surfaces.length > 0 ? (await $.ui.open({ id: PANE, title: 'Kontext' })).isPlaced : false
+      const modus = (await $.store.get(STORE_MODUS)) === 'immer' ? 'immer' : 'warnungen'
+      return {
+        text: [
+          'Kontextleiste 0.4.0 ist aktiv.',
+          `Oberflächen: ${surfaces.length > 0 ? surfaces.join(', ') : 'keine'}`,
+          `Band über dem Eingabefeld gezeichnet: ${bandGezeichnet ? 'ja' : 'nein'}`,
+          `Pane geöffnet: ${offen ? 'ja' : 'nein'}`,
+          `Modus ohne Zeichenfläche: ${modus}`,
+        ].join('\n'),
+      }
+    }
+    return { text: textzeile(k, l, jetzt) }
   })
 }

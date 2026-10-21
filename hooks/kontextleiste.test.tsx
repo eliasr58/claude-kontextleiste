@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, SessionContextBreakdown, SessionRateLimit } from 'claude-code'
+import type { On, SessionContextBreakdown, SessionMeasureInput, SessionRateLimit } from 'claude-code'
 
 const BAND = {
   plugin: 'kontextleiste',
@@ -98,6 +98,107 @@ test('Limits einer anderen Sitzung kommen live an', async ($, on) => {
 
   ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /5h/ }))?.text).toBe('  5h 88 %')
+  expect(await ui.find({ type: 'Text', text: /vor \d/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/kontextleiste meldet den Zustand und zeigt die Leiste im Pane', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  speicher(on)
+  engine(on, [{ kind: 'five_hour', percentUsed: 23 }])
+  on('command.register', () => ({ value: { command: 'kontextleiste' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const antwort = await $.command.run({
+    command: 'kontextleiste',
+    args: 'status',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 100 },
+  })
+  expect(antwort.text).toContain('Kontextleiste 0.4.0 ist aktiv.')
+  expect(antwort.text).toContain('Oberflächen: desktop')
+  expect(antwort.text).toContain('Band über dem Eingabefeld gezeichnet: nein')
+
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'kontextleiste',
+      component: 'Pane',
+      requestId: 'kontextleiste',
+      surface,
+      props: {
+        title: 'Kontext',
+        isFocused: false,
+        bodyColumns: 100,
+        placement: 'dock',
+        scroll: { offset: 0, bodyRows: 5 },
+        view: {},
+      },
+    })
+    expect((await ui.find({ type: 'Text', text: /Kompaktierung/ }))?.text).toBe(
+      ' · noch 18 % bis Kompaktierung',
+    )
+    await ui.unmount()
+  }
+})
+
+const BEFEHL = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const
+
+test('ohne Zeichenfläche: Befehl zeigt die Leiste als Text, Schwelle meldet einmal', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  speicher(on)
+  const sitzung = mock.session(on)
+  engine(on, [{ kind: 'five_hour', percentUsed: 23 }])
+  on('command.register', () => ({ value: { command: 'kontextleiste' } }))
+  on('session.surfaces', () => ({ value: [] }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const zeile = await $.command.run({ ...BEFEHL, command: 'kontextleiste', args: '' })
+  expect(zeile.text).toBe('━━━━━━━━━━━━━━━━━━━─────│────── 62 % · noch 18 % bis Kompaktierung · 5h 23 %')
+
+  const messung: SessionMeasureInput = {
+    context: { tokens: 170_000, window: 200_000, percent: 85 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 23 }],
+    changed: ['context'],
+  }
+  await $.session.measure(messung)
+  await $.session.measure(messung)
+
+  const hinweise = sitzung.appended().filter(r => r.message.type === 'system')
+  expect(hinweise.length).toBe(1)
+  expect(JSON.stringify(hinweise[0]?.message.content)).toContain('Kompaktierung steht an')
+})
+
+test('Modus wird per Befehl umgeschaltet und gespeichert', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const daten = speicher(on)
+  engine(on, [])
+  on('command.register', () => ({ value: { command: 'kontextleiste' } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const antwort = await $.command.run({ ...BEFEHL, command: 'kontextleiste', args: 'immer' })
+  expect(antwort.text).toContain('nach jeder Antwort')
+  expect(daten.modus).toBe('immer')
+})
+
+test('eine Messung ohne Limitänderung frischt die Altersangabe auf', async ($, on) => {
+  const uhr = mock.clock(on, { now: 0 })
+  speicher(on)
+  engine(on, [{ kind: 'five_hour', percentUsed: 62 }])
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  await uhr.advance(18 * 60_000)
+  // Kontext bewegt sich, das Limit steht unverändert bei 62 %.
+  await $.session.measure({
+    context: { tokens: 130_000, window: 200_000, percent: 65 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 62 }],
+    changed: ['context'],
+  })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /5h/ }))?.text).toBe('  5h 62 %')
   expect(await ui.find({ type: 'Text', text: /vor \d/ })).toBeUndefined()
   await ui.unmount()
 })
