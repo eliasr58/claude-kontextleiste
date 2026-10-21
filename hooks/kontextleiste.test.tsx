@@ -102,14 +102,15 @@ test('Limits einer anderen Sitzung kommen live an', async ($, on) => {
   await ui.unmount()
 })
 
-test('/kontextleiste meldet den Zustand und zeigt die Leiste im Pane', async ($, on) => {
+test('/kontextleiste status meldet den Zustand und öffnet nichts', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   speicher(on)
   engine(on, [{ kind: 'five_hour', percentUsed: 23 }])
   on('command.register', () => ({ value: { command: 'kontextleiste' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  let geoeffnet = 0
+  on('ui.open', () => { geoeffnet++; return { value: { isPlaced: true } } })
+  on('session.surfaces', () => ({ value: ['terminal'] }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const antwort = await $.command.run({
     command: 'kontextleiste',
@@ -117,30 +118,10 @@ test('/kontextleiste meldet den Zustand und zeigt die Leiste im Pane', async ($,
     origin: { kind: 'composer' },
     presentation: { isFullscreen: false, columns: 100 },
   })
-  expect(antwort.text).toContain('Kontextleiste 0.4.0 ist aktiv.')
-  expect(antwort.text).toContain('Oberflächen: desktop')
-  expect(antwort.text).toContain('Band über dem Eingabefeld gezeichnet: nein')
-
-  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
-    const ui = await $.ui.mount({
-      plugin: 'kontextleiste',
-      component: 'Pane',
-      requestId: 'kontextleiste',
-      surface,
-      props: {
-        title: 'Kontext',
-        isFocused: false,
-        bodyColumns: 100,
-        placement: 'dock',
-        scroll: { offset: 0, bodyRows: 5 },
-        view: {},
-      },
-    })
-    expect((await ui.find({ type: 'Text', text: /Kompaktierung/ }))?.text).toBe(
-      ' · noch 18 % bis Kompaktierung',
-    )
-    await ui.unmount()
-  }
+  expect(antwort.text).toContain('Kontextleiste 0.4.1 ist aktiv.')
+  expect(antwort.text).toContain('Oberflächen: terminal')
+  expect(antwort.text).not.toContain('Pane')
+  expect(geoeffnet).toBe(0)
 })
 
 const BEFEHL = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } } as const

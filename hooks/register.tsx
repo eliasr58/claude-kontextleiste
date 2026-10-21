@@ -19,8 +19,6 @@ const STORE_LIMITS = 'limits'
 const ABGLEICH_MS = 15_000
 /** Ab diesem Alter zeigt die Leiste, wie alt die Limits sind. */
 const ALT_MS = 2 * 60_000
-/** Id des Panes, in dem die Leiste auch gezeigt werden kann. */
-const PANE = 'kontextleiste'
 
 const FARBE = {
   gruen: '#639922',
@@ -380,10 +378,6 @@ export const register: Register = on => {
     return zeichnen($, e, e.props.bodyColumns)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) =>
-    zeichnen($, e, e.props.bodyColumns),
-  )
-
   on('command.run', { command: 'kontextleiste' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     const k = await read($, kontext)
@@ -415,14 +409,12 @@ export const register: Register = on => {
     }
     if (arg === 'status') {
       const surfaces = await $.session.surfaces()
-      const offen = surfaces.length > 0 ? (await $.ui.open({ id: PANE, title: 'Kontext' })).isPlaced : false
       const modus = (await $.store.get(STORE_MODUS)) === 'immer' ? 'immer' : 'warnungen'
       return {
         text: [
-          'Kontextleiste 0.4.0 ist aktiv.',
+          'Kontextleiste 0.4.1 ist aktiv.',
           `Oberflächen: ${surfaces.length > 0 ? surfaces.join(', ') : 'keine'}`,
           `Band über dem Eingabefeld gezeichnet: ${bandGezeichnet ? 'ja' : 'nein'}`,
-          `Pane geöffnet: ${offen ? 'ja' : 'nein'}`,
           `Modus ohne Zeichenfläche: ${modus}`,
         ].join('\n'),
       }
